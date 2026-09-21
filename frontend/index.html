@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Crop Disease Detection & Advisory</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #245a28; }
+    .container { max-width: 700px; margin: auto; background: #b7d5e2; padding: 20px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    h1 { font-size: 22px; margin-bottom: 10px; }
+    label { display: block; margin-top: 12px; font-weight: bold; }
+    select, input[type="file"] { width: 100%; margin-top: 6px; }
+    button { margin-top: 16px; padding: 10px 16px; background: #1f7a3f; color: #040c11; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; }
+    button:disabled { background: #d17daf; }
+    .result { margin-top: 20px; }
+    .card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-top: 10px; background: #fafcff; }
+    .title { font-weight: bold; font-size: 16px; margin-bottom: 6px; }
+    ul { margin: 6px 0 0 18px; }
+    .error { color: #c00; margin-top: 10px; }
+    .status { display: none; margin-top: 10px; font-size: 14px; }
+    .status.ok { color: #0a0; }
+    .status.warning { color: #f80; }
+    .status.error { color: #c00; }
+    img#preview { max-width: 100%; margin-top: 10px; border-radius: 6px; display: none; }
+    .loading { display: none; margin-top: 10px; }
+    .spinner { 
+      display: inline-block; 
+      width: 20px; 
+      height: 20px; 
+      border: 3px solid #f3f3f3; 
+      border-top: 3px solid #1f7a3f; 
+      border-radius: 50%; 
+      animation: spin 1s linear infinite; 
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Crop Disease Detection & Advisory</h1>
+
+    <label for="crop">Crop</label>
+    <select id="crop">
+      <option value="Tomato">Tomato</option>
+      <option value="Potato">Potato</option>
+      <option value="Paddy">Paddy</option>
+      <option value="Cotton">Cotton</option>
+    </select>
+
+    <label for="image">Upload leaf image</label>
+    <input type="file" id="image" accept="image/*" />
+    <img id="preview" alt="Preview" />
+
+    <button id="analyzeBtn" disabled>Analyze & Get Advice</button>
+    
+    <!-- Server status with better feedback -->
+    <div id="serverStatus" class="status"></div>
+    <div id="loading" class="loading">
+      <div class="spinner"></div> Processing image...
+    </div>
+    
+    <div id="error" class="error"></div>
+    <div id="result" class="result"></div>
+  </div>
+
+  <script>
+    const imageInput = document.getElementById('image');
+    const preview = document.getElementById('preview');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const resultDiv = document.getElementById('result');
+    const errorDiv = document.getElementById('error');
+    const cropSelect = document.getElementById('crop');
+    const loadingDiv = document.getElementById('loading');
+
+    imageInput.addEventListener('change', () => {
+      const file = imageInput.files[0];
+      if (!file) {
+        preview.style.display = 'none';
+        analyzeBtn.disabled = true;
+        return;
+      }
+      preview.style.display = 'block';
+      preview.src = URL.createObjectURL(file);
+      analyzeBtn.disabled = false;
+      updateAnalyzeButtonState();
+      resultDiv.innerHTML = '';
+      errorDiv.textContent = '';
+      loadingDiv.style.display = 'none';
+    });
+
+    function updateAnalyzeButtonState() {
+      const file = imageInput.files[0];
+      analyzeBtn.disabled = !(file && backendHealthy);
+    }
+
+    let apiBase;
+    if (location && location.protocol === 'file:') {
+      apiBase = 'http://127.0.0.1:8000';
+    } else if (location && location.origin) {
+      apiBase = location.origin;
+    } else {
+      apiBase = 'http://127.0.0.1:8000';
+    }
+
+    const serverStatusDiv = document.getElementById('serverStatus');
+    serverStatusDiv.style.display = 'none';
+    let backendHealthy = false;
+    let pollInterval = 30000;  // Start with 30 seconds
+    const maxInterval = 120000; // Max 2 minutes
+    let healthCheckTimeout = null;
+
+    async function fetchWithFallback(urls, options = {}) {
+      let lastError = null;
+      for (const url of urls) {
+        try {
+          const response = await fetch(url, options);
+          if (response.status !== 404) {
+            return { response, url };
+          }
+          lastError = new Error(`404 from ${url}`);
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error('No backend URL worked');
+    }
+
+    async function checkHealth() {
+      try {
+        const urls = [`${apiBase}/health`, `${apiBase}/api/health`];
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+        
+        try {
+          const { response } = await fetchWithFallback(urls, { 
+            cache: 'no-store',
+            signal: controller.signal 
+          });
+          clearTimeout(timeoutId);
+          
+          if (response.ok) {
+            serverStatusDiv.textContent = `✓ Backend ready`;
+            serverStatusDiv.className = 'status ok';
+            serverStatusDiv.style.display = 'none';
+            backendHealthy = true;
+            pollInterval = 30000;  // Reset to 30s on success
+          } else {
+            serverStatusDiv.textContent = `✗ Backend error (${response.status})`;
+            serverStatusDiv.className = 'status error';
+            serverStatusDiv.style.display = 'none';
+            backendHealthy = false;
+            pollInterval = Math.min(pollInterval * 1.5, maxInterval);
+          }
+        } catch (fetchErr) {
+          clearTimeout(timeoutId);
+          throw fetchErr;
+        }
+      } catch (err) {
+        if (location.protocol === 'file:') {
+          serverStatusDiv.textContent = `✗ Backend not reachable (${apiBase}). Start the backend.`;
+        } else {
+          serverStatusDiv.textContent = `✗ Backend not reachable (${apiBase})`;
+        }
+        serverStatusDiv.className = 'status error';
+        serverStatusDiv.style.display = 'none';
+        backendHealthy = false;
+        pollInterval = Math.min(pollInterval * 1.5, maxInterval);
+      }
+      
+      updateAnalyzeButtonState();
+      
+      // Schedule next check with dynamic interval
+      if (healthCheckTimeout) clearTimeout(healthCheckTimeout);
+      healthCheckTimeout = setTimeout(checkHealth, pollInterval);
+    }
+
+    // Initial check and periodic polling with exponential backoff
+    checkHealth();
+
+    analyzeBtn.addEventListener('click', async () => {
+      const file = imageInput.files[0];
+      if (!file) return;
+      if (!backendHealthy) {
+        if (location.protocol === 'file:') {
+          errorDiv.textContent = `Backend unreachable at ${apiBase}. Start the backend and open the app from http://127.0.0.1:8000/ instead of file://.`;
+        } else {
+          errorDiv.textContent = `Backend unreachable at ${apiBase}. Ensure the backend is running and accessible.`;
+        }
+        return;
+      }
+
+      analyzeBtn.disabled = true;
+      loadingDiv.style.display = 'block';
+      resultDiv.innerHTML = '';
+      errorDiv.textContent = '';
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('crop', cropSelect.value);
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+        
+        try {
+          const { response: res } = await fetchWithFallback([
+            `${apiBase}/predict`,
+            `${apiBase}/api/predict`
+          ], {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+          
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Server error: ${res.status} ${text}`);
+          }
+          const data = await res.json();
+          renderResult(data);
+        } catch (fetchErr) {
+          clearTimeout(timeoutId);
+          throw fetchErr;
+        }
+      } catch (e) {
+        console.error('Fetch/predict error', e);
+        let msg = e && e.message ? e.message : String(e);
+        if (e && e.name === 'AbortError') {
+          msg = `Request timed out (${apiBase}). Server is too slow.`;
+        } else if (e && e.name === 'TypeError') {
+          msg += ` — network error or CORS issue. Ensure backend is running at ${apiBase}`;
+        }
+        errorDiv.textContent = msg;
+      } finally {
+        analyzeBtn.disabled = false;
+        loadingDiv.style.display = 'none';
+      }
+    });
+
+    function renderResult(data) {
+      const p = data.prediction;
+      const a = data.advisory;
+
+      // Handle both string and array symptoms
+      const symptomsText = Array.isArray(a.symptoms) ? a.symptoms : [a.symptoms];
+
+      const html = `
+        <div class="card">
+          <div class="title">Prediction</div>
+          <div>Disease: <b>${escapeHtml(p.disease)}</b></div>
+          <div>Confidence: ${(p.confidence * 100).toFixed(1)}%</div>
+        </div>
+
+        <div class="card">
+          <div class="title">Symptoms</div>
+          <ul>${symptomsText.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>
+        </div>
+
+        <div class="card">
+          <div class="title">Treatment</div>
+          <ul>${a.treatment.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>
+        </div>
+
+        <div class="card">
+          <div class="title">Prevention</div>
+          <ul>${a.prevention.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>
+        </div>
+      `;
+      resultDiv.innerHTML = html;
+    }
+
+    // Helper function to prevent XSS
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+      if (healthCheckTimeout) clearTimeout(healthCheckTimeout);
+    });
+  </script>
+</body>
+</html>
